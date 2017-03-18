@@ -219,13 +219,17 @@ public:
         if (typeinfo->simple_type) { /* Case 1: no multiple inheritance etc. involved */
             /* Check if we can safely perform a reinterpret-style cast */
             if (PyType_IsSubtype(tobj, typeinfo->type)) {
-                value = reinterpret_cast<instance<void> *>(src.ptr())->value;
+                auto inst = reinterpret_cast<instance<void> *>(src.ptr());
+                value = inst->value;
+                const_ = inst->const_;
                 return true;
             }
         } else { /* Case 2: multiple inheritance */
             /* Check if we can safely perform a reinterpret-style cast */
             if (tobj == typeinfo->type) {
-                value = reinterpret_cast<instance<void> *>(src.ptr())->value;
+                auto inst = reinterpret_cast<instance<void> *>(src.ptr());
+                value = inst->value;
+                const_ = inst->const_;
                 return true;
             }
 
@@ -269,6 +273,7 @@ public:
     PYBIND11_NOINLINE static handle cast(const void *_src, return_value_policy policy, handle parent,
                                          const std::type_info *type_info,
                                          const std::type_info *type_info_backup,
+                                         bool const_,
                                          void *(*copy_constructor)(const void *),
                                          void *(*move_constructor)(const void *),
                                          const void *existing_holder = nullptr) {
@@ -297,8 +302,11 @@ public:
         auto it_instances = internals.registered_instances.equal_range(src);
         for (auto it_i = it_instances.first; it_i != it_instances.second; ++it_i) {
             auto instance_type = detail::get_type_info(Py_TYPE(it_i->second));
-            if (instance_type && instance_type == tinfo)
-                return handle((PyObject *) it_i->second).inc_ref();
+            if (instance_type && instance_type == tinfo) {
+                handle instance = (PyObject *) it_i->second;
+                if (const_ == reinterpret_cast<instance_essentials<void> *>(instance.ptr())->const_)
+                    return instance.inc_ref();
+            }
         }
 
         auto inst = reinterpret_steal<object>(PyType_GenericAlloc(tinfo->type, 0));
@@ -307,6 +315,7 @@ public:
 
         wrapper->value = nullptr;
         wrapper->owned = false;
+        wrapper->const_ = const_;
 
         switch (policy) {
             case return_value_policy::automatic:
@@ -328,6 +337,7 @@ public:
                     throw cast_error("return_value_policy = copy, but the "
                                      "object is non-copyable!");
                 wrapper->owned = true;
+                wrapper->const_ = false;
                 break;
 
             case return_value_policy::move:
@@ -339,6 +349,7 @@ public:
                     throw cast_error("return_value_policy = move, but the "
                                      "object is neither movable nor copyable!");
                 wrapper->owned = true;
+                wrapper->const_ = false;
                 break;
 
             case return_value_policy::reference_internal:
@@ -361,6 +372,7 @@ public:
 protected:
     const type_info *typeinfo = nullptr;
     void *value = nullptr;
+    bool const_ = false;
     object temp;
 };
 
@@ -391,33 +403,44 @@ public:
     type_caster_base() : type_caster_base(typeid(type)) { }
     explicit type_caster_base(const std::type_info &info) : type_caster_generic(info) { }
 
-    static handle cast(const itype &src, return_value_policy policy, handle parent) {
-        if (policy == return_value_policy::automatic || policy == return_value_policy::automatic_reference)
-            policy = return_value_policy::copy;
+    template <typename T, enable_if_t<!std::is_pointer<T>::value, int> = 0>
+    static handle cast(T &&src, return_value_policy policy, handle parent) {
+        if (std::is_rvalue_reference<T>::value) {
+            policy = return_value_policy::move;
+        } else {
+            if (policy == return_value_policy::automatic ||
+                policy == return_value_policy::automatic_reference)
+                policy = return_value_policy::copy;
+        }
         return cast(&src, policy, parent);
     }
 
-    static handle cast(itype &&src, return_value_policy, handle parent) {
-        return cast(&src, return_value_policy::move, parent);
-    }
-
-    static handle cast(const itype *src, return_value_policy policy, handle parent) {
+    template <typename T, enable_if_t<std::is_pointer<T>::value, int> = 0>
+    static handle cast(T src, return_value_policy policy, handle parent) {
         return type_caster_generic::cast(
             src, policy, parent, src ? &typeid(*src) : nullptr, &typeid(type),
+            std::is_const<typename std::remove_pointer<T>::type>::value,
             make_copy_constructor(src), make_move_constructor(src));
     }
 
-    static handle cast_holder(const itype *src, const void *holder) {
+    template <typename T, enable_if_t<std::is_pointer<T>::value, int> = 0>
+    static handle cast_holder(T src, const void *holder) {
         return type_caster_generic::cast(
-            src, return_value_policy::take_ownership, {},
+            src, return_value_policy::take_ownership, { },
             src ? &typeid(*src) : nullptr, &typeid(type),
+            std::is_const<typename std::remove_pointer<T>::type>::value,
             nullptr, nullptr, holder);
     }
 
-    template <typename T> using cast_op_type = pybind11::detail::cast_op_type<T>;
+    template <typename T>
+    using cast_op_type = typename std::conditional<
+        std::is_pointer<typename std::remove_reference<T>::type>::value, T,
+        typename std::add_lvalue_reference<T>::type>::type;
 
-    operator itype*() { return (type *) value; }
-    operator itype&() { if (!value) throw reference_cast_error(); return *((itype *) value); }
+    operator itype*() { if (const_) throw unsuccessful_cast_error(); return (type *) value; }
+    operator itype&() { if (!value || const_) throw unsuccessful_cast_error(); return *((itype *) value); }
+    operator const itype*() { return (type *) value; }
+    operator const itype&() { if (!value) throw unsuccessful_cast_error(); return *((itype *) value); }
 
 protected:
     typedef void *(*Constructor)(const void *stream);
@@ -989,18 +1012,25 @@ public:
 
     explicit operator type*() { return this->value; }
     explicit operator type&() { return *(this->value); }
+    explicit operator const type*() { return this->value; }
+    explicit operator const type&() { return *(this->value); }
+
     explicit operator holder_type*() { return &holder; }
+    explicit operator const holder_type*() { return &holder; }
 
     // Workaround for Intel compiler bug
     // see pybind11 issue 94
     #if defined(__ICC) || defined(__INTEL_COMPILER)
     operator holder_type&() { return holder; }
+    operator const holder_type&() { return holder; }
     #else
     explicit operator holder_type&() { return holder; }
+    explicit operator const holder_type&() { return holder; }
     #endif
 
-    static handle cast(const holder_type &src, return_value_policy, handle) {
-        const auto *ptr = holder_helper<holder_type>::get(src);
+    template <typename T>
+    static handle cast(T&&src, return_value_policy, handle) {
+        auto ptr = holder_helper<holder_type>::get(src);
         return type_caster_base<type>::cast_holder(ptr, &src);
     }
 

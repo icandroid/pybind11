@@ -335,6 +335,7 @@ template <typename type> struct instance_essentials {
     PyObject *weakrefs;
     bool owned : 1;
     bool holder_constructed : 1;
+    bool const_ : 1;
 };
 
 /// PyObject wrapper around generic types, includes a special holder type that is responsible for lifetime management
@@ -592,7 +593,7 @@ PYBIND11_RUNTIME_EXCEPTION(key_error, PyExc_KeyError)
 PYBIND11_RUNTIME_EXCEPTION(value_error, PyExc_ValueError)
 PYBIND11_RUNTIME_EXCEPTION(type_error, PyExc_TypeError)
 PYBIND11_RUNTIME_EXCEPTION(cast_error, PyExc_RuntimeError) /// Thrown when pybind11::cast or handle::call fail due to a type casting error
-PYBIND11_RUNTIME_EXCEPTION(reference_cast_error, PyExc_RuntimeError) /// Used internally
+PYBIND11_RUNTIME_EXCEPTION(unsuccessful_cast_error, PyExc_RuntimeError) /// Used internally
 
 [[noreturn]] PYBIND11_NOINLINE inline void pybind11_fail(const char *reason) { throw std::runtime_error(reason); }
 [[noreturn]] PYBIND11_NOINLINE inline void pybind11_fail(const std::string &reason) { throw std::runtime_error(reason); }

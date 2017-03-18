@@ -556,7 +556,7 @@ protected:
                 // 6. Call the function.
                 try {
                     result = func.impl(call);
-                } catch (reference_cast_error &) {
+                } catch (unsuccessful_cast_error &) {
                     result = PYBIND11_TRY_NEXT_OVERLOAD;
                 }
 
@@ -584,7 +584,7 @@ protected:
                 for (auto &call : second_pass) {
                     try {
                         result = call.func.impl(call);
-                    } catch (reference_cast_error &) {
+                    } catch (unsuccessful_cast_error &) {
                         result = PYBIND11_TRY_NEXT_OVERLOAD;
                     }
 
